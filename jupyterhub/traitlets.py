@@ -8,6 +8,10 @@ from traitlets import List, Unicode, Integer, TraitError
 
 
 class URLPrefix(Unicode):
+    """
+    A subclass of Unicode that ensure the prefix starts and ends with 
+    at least a '/'
+    """
     def validate(self, obj, value):
         u = super().validate(obj, value)
         if not u.startswith('/'):
