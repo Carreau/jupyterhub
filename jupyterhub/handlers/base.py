@@ -242,10 +242,6 @@ class BaseHandler(RequestHandler):
         return user
 
     def clear_login_cookie(self, name=None):
-        if name is None:
-            user = self.get_current_user()
-        else:
-            user = self.find_user(name)
         kwargs = {}
         if self.subdomain_host:
             kwargs['domain'] = self.domain
@@ -258,7 +254,7 @@ class BaseHandler(RequestHandler):
         kwargs = {
             'httponly': True,
         }
-        if  self.request.protocol == 'https':
+        if self.request.protocol == 'https':
             kwargs['secure'] = True
         if self.subdomain_host:
             kwargs['domain'] = self.domain
@@ -297,6 +293,7 @@ class BaseHandler(RequestHandler):
             self.set_hub_cookie(user)
 
     def authenticate(self, data):
+        print(self.authenticator.get_authenticated_user)
         return gen.maybe_future(self.authenticator.get_authenticated_user(self, data))
 
 

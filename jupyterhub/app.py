@@ -4,6 +4,8 @@
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
 
+from there import print
+
 import atexit
 import binascii
 from datetime import datetime
@@ -190,129 +192,75 @@ class UpgradeDB(Application):
         dbutil.upgrade(hub.db_url)
 
 
-class JupyterHubDispatcherApp(JupyterHub):
-    """
-
-    A JupyterHub Like entity responsible for Authenticating and assigning a user
-    to a given hub, this allow better scalling of a hub-based deployment.
+from .handlers.login import LoginHandler
 
 
-                                |
-                    +-----------+
-                    |           |
-                    |           |
-                    |   +-------v-----------------+      Cookie Set
-                    |   |                         |
-                    |   | Configurable HTTP Proxy +---------+------------+---...
-                    |   |       (aka CHP)         |         |            |
-                    |   +-------------------------+         |            |
-                    |           |                           |            |
-                    |           |                           v            v
-      Set Cookie    |           | No Cookies         +---------+  +---------+
-      and redirect  |           |                    |         |  |         |
-                    |           |                    |  Hub A  |  |  Hub B  |
-                    |           |                    |         |  |         |
-                    |           |                    +---------+  +---------+
-                    |           v
-                    |   +--------------------------+
-                    |   |                          |
-                    |   |   Hub Dispatcher         |
-                    |   |                          |
-                    |   |   - Authenticate         |
-                    |   |   - Which Hub For User   |
-                    +---+                          |
-                        +--------------------------+
-                                ^
-                                |
-                                |
-                                v
-                        +--------------------------+
-                        |                          |
-                        |  DataBase or User/Hub    |
-                        |                          |
-                        +--------------------------+
+class DispatcherLoginHandler(LoginHandler):
     
 
-    When a user hit a configurable HTTP proxy for the first time it has no
-    cookie set to indicate to which hub it needs to be redirected to. 
-    The Proxy thus forward the request to the hub dispatcher. 
-
-    THe hub dispatcher querries a database of User <-> Hub Mapping (If a user
-    have ever been assigneed to a hub it has to be reassiged to the same as we
-    have no way to repartition user across hubs for now). And assign the user to
-    this hub. If a user have never been assigned to a hub, it assigns the user
-    to an available hub that meet the criteria for this user and store this
-    assignement, it will as well authenticate the user. 
-
-    The Hub dispatcher will as well authenticate the user – with a pluggable
-    authenticator, and set 2 cookies for the users.
-
-      - Proxy Cookie will be used by the Proxy to know to which hub the user
-        need to be redirected on subsequent requests
-
-      - Second cookie is signed by a shared secret between the HubDispatcher
-        and the Hubs and contain a token indicating that the user has been
-        correctly authenticated with given identity.
-
-    Once the user is authenticated, it should trigger a redictect 302 after
-    setting the cookie. Thus the client will hit the proxy with the cookie set
-    and now hit the corresponding hub that will accept the given user.
-
-    The Hub Dispatcher Need to be able to Authenticate a large number of users,
-    fast. And assign them to hubs – knowing when the hubs are full and need to
-    be scalled up.
-
-    Thus the HUb dispatcher likely should have an indication of maximum of users
-    per hub. And should likely have the ability to spawn new hubs if
-    necesary.
-
-    The Hub dispatcher shold be virtually indistinguishable from a classic
-    JupyterHub except it will alway only authenticate and redirect users to a
-    fleet of hub. 
-
-    The above schema can be scale further by multiplying the CHPs and
-    Hub Dispatchers
+    def set_which_hub_cookie(self, user):
+        """set the cookie for the chp indicating to which hub to redirect"""
+        hub = self.get_hub_for_user(user.username)
+        self.set_secure_cookie('which_hub', hub)
 
 
-    QUESTIONS: 
-    ----------
+    def get_hub_for_user(self, username:str)-> str:
+        hub = self.db.get_hub_for_user(username, None)
+        if not hub:
+            self.statsd.incr('find_hub.existing')
+            import random
+            hub = random.choice(self.hubs.keys())
+            self.db.set-hub_for_user(username, hub)
+        else:
+            self.statsd.incr('find_hub.new')
+        return hub
 
-    - For scalability do we assume that there is at maximum 1 Dispatcher that
-    can add users to a given hub ? That recuces concurency issues.
 
-    - What about admins and contriol pannels ? AN admind control-pannel should
-    likely see informations from _all_ the hubs. Do we set a special cookie to
-    let the admin change hub when they want to open a specific user's server ? 
+    @gen.coroutine
+    def post(self):
+        # parse the arguments dict
+        data = {}
+        for arg in self.request.arguments:
+            data[arg] = self.get_argument(arg, strip=False)
 
-    """
+        auth_timer = self.statsd.timer('login.authenticate').start()
+        authenticated = yield self.authenticate(data)
+        auth_timer.stop(send=False)
 
-    name = 'jupyterhubdispatcher'
-    descritption = """Start a JupyterHub Dispatcher node
+        # unpack auth dict
+        username = authenticated['name']
+        auth_state = authenticated.get('auth_state')
 
-    A JupyterHub dispatcher is responsible to assign users to a fleet of
-    JupyterHub nodes. 
-    """
-
-    def init_db(self, *args, **kwargs):
-        pass
-
-    def init_hub(self, *args, **kwargs):
-        """
-        This should likely starts a JupyterHubDispatcher subclass of Hub that does what is described above
-        """
-        pass
-
-    def init_proxy(self, *args, **kwargs): 
-        """
-        The proxy should be made aware of the Dispatcher specificity
-        """
-        pass
-
-    def init_spawners(self, *args, **kwargs):
-        """
-        A hub dispatcher should likely _never_ spawn things (maybe extra HUbs ? )
-        """
-        pass
+        if authenticated:
+            self.statsd.incr('login.success')
+            self.statsd.timing('login.authenticate.success', auth_timer.ms)
+            user = self.user_from_username(username)
+            if auth_state is not None:
+                user.auth_state = auth_state
+                self.db.commit()
+            #already_running = False
+            #if user.spawner:
+            #    status = yield user.spawner.poll()
+            #    already_running = (status == None)
+            #if not already_running and not user.spawner.options_form:
+            #    yield self.spawn_single_user(user)
+            self.set_login_cookie(user)
+            next_url = self.get_argument('next', default='')
+            if not next_url.startswith('/'):
+                next_url = ''
+            next_url = next_url or self.hub.base_url
+            self.redirect(next_url)
+            self.log.info("User logged in: %s", username)
+        else:
+            self.statsd.incr('login.failure')
+            self.statsd.timing('login.authenticate.failure', auth_timer.ms)
+            self.log.debug("Failed login for %s", data.get('username', 'unknown user'))
+            html = self._render(
+                login_error='Invalid username or password',
+                username=username,
+            )
+            self.finish(html)
+ 
 
 
 
@@ -851,6 +799,7 @@ class JupyterHub(Application):
         h.extend(apihandlers.default_handlers)
 
         h.append((r'/logo', LogoHandler, {'path': self.logo_file}))
+        print("SHould not be here")
         self.handlers = self.add_url_prefix(self.hub_prefix, h)
         # some extra handlers, outside hub_prefix
         self.handlers.extend([
@@ -1379,6 +1328,7 @@ class JupyterHub(Application):
 
     def init_tornado_application(self):
         """Instantiate the tornado Application object"""
+        print("init tornado app with", self.handlers)
         self.tornado_application = web.Application(self.handlers, **self.tornado_settings)
 
     def init_pycurl(self):
@@ -1670,11 +1620,152 @@ class JupyterHub(Application):
         except KeyboardInterrupt:
             print("\nInterrupted")
 
+class JupyterHubDispatcherApp(JupyterHub):
+    """
+
+    A JupyterHub Like entity responsible for Authenticating and assigning a user
+    to a given hub, this allow better scalling of a hub-based deployment.
+
+
+                                |
+                    +-----------+
+                    |           |
+                    |           |
+                    |   +-------v-----------------+      Cookie Set
+                    |   |                         |
+                    |   | Configurable HTTP Proxy +---------+------------+---...
+                    |   |       (aka CHP)         |         |            |
+                    |   +-------------------------+         |            |
+                    |           |                           |            |
+                    |           |                           v            v
+      Set Cookie    |           | No Cookies         +---------+  +---------+
+      and redirect  |           |                    |         |  |         |
+                    |           |                    |  Hub A  |  |  Hub B  |
+                    |           |                    |         |  |         |
+                    |           |                    +---------+  +---------+
+                    |           v
+                    |   +--------------------------+
+                    |   |                          |
+                    |   |   Hub Dispatcher         |
+                    |   |                          |
+                    |   |   - Authenticate         |
+                    |   |   - Which Hub For User   |
+                    +---+                          |
+                        +--------------------------+
+                                ^
+                                |
+                                |
+                                v
+                        +--------------------------+
+                        |                          |
+                        |  DataBase or User/Hub    |
+                        |                          |
+                        +--------------------------+
+    
+
+    When a user hit a configurable HTTP proxy for the first time it has no
+    cookie set to indicate to which hub it needs to be redirected to. 
+    The Proxy thus forward the request to the hub dispatcher. 
+
+    THe hub dispatcher querries a database of User <-> Hub Mapping (If a user
+    have ever been assigneed to a hub it has to be reassiged to the same as we
+    have no way to repartition user across hubs for now). And assign the user to
+    this hub. If a user have never been assigned to a hub, it assigns the user
+    to an available hub that meet the criteria for this user and store this
+    assignement, it will as well authenticate the user. 
+
+    The Hub dispatcher will as well authenticate the user – with a pluggable
+    authenticator, and set 2 cookies for the users.
+
+      - Proxy Cookie will be used by the Proxy to know to which hub the user
+        need to be redirected on subsequent requests
+
+      - Second cookie is signed by a shared secret between the HubDispatcher
+        and the Hubs and contain a token indicating that the user has been
+        correctly authenticated with given identity.
+
+    Once the user is authenticated, it should trigger a redictect 302 after
+    setting the cookie. Thus the client will hit the proxy with the cookie set
+    and now hit the corresponding hub that will accept the given user.
+
+    The Hub Dispatcher Need to be able to Authenticate a large number of users,
+    fast. And assign them to hubs – knowing when the hubs are full and need to
+    be scalled up.
+
+    Thus the HUb dispatcher likely should have an indication of maximum of users
+    per hub. And should likely have the ability to spawn new hubs if
+    necesary.
+
+    The Hub dispatcher shold be virtually indistinguishable from a classic
+    JupyterHub except it will alway only authenticate and redirect users to a
+    fleet of hub. 
+
+    The above schema can be scale further by multiplying the CHPs and
+    Hub Dispatchers
+
+
+    QUESTIONS: 
+    ----------
+
+    - For scalability do we assume that there is at maximum 1 Dispatcher that
+    can add users to a given hub ? That recuces concurency issues.
+
+    - What about admins and contriol pannels ? AN admind control-pannel should
+    likely see informations from _all_ the hubs. Do we set a special cookie to
+    let the admin change hub when they want to open a specific user's server ? 
+
+    """
+
+    #name = 'jupyterhubdispatcher'
+    description = """Start a JupyterHub Dispatcher node
+
+    A JupyterHub dispatcher is responsible to assign users to a fleet of
+    JupyterHub nodes. 
+    """
+
+    hubs = Dict(default={}, help="""mapping from hub names to maximum capacity""")
+
+    def initialize(self, *args, **kwargs):
+        super().initialize(*args, **kwargs)
+
+
+    def init_handlers(self):
+        self.handlers =(
+            (r"/hub/login", DispatcherLoginHandler),
+            #(r"(?!%s).*" % self.hub_prefix, handlers.PrefixRedirectHandler),
+            #(r'(.*)', handlers.Template404),
+        )
+
+    # def init_db(self, *args, **kwargs):
+    #     pass
+
+    # def init_hub(self, *args, **kwargs):
+    #     """
+    #     This should likely starts a JupyterHubDispatcher subclass of Hub that does what is described above
+    #     """
+    #     pass
+
+    # def init_proxy(self, *args, **kwargs): 
+    #     """
+    #     The proxy should be made aware of the Dispatcher specificity
+    #     """
+    #     pass
+
+    def init_spawners(self, *args, **kwargs):
+        """
+        A hub dispatcher should likely _never_ spawn things (maybe extra HUbs ? )
+        """
+        pass
+
+    # def init_oauth(self, *args, **kwargs):
+    #     pass
 
 NewToken.classes.append(JupyterHub)
 UpgradeDB.classes.append(JupyterHub)
 
 main = JupyterHub.launch_instance
+
+main = JupyterHubDispatcherApp.launch_instance
 
 if __name__ == "__main__":
     main()
