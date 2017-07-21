@@ -283,8 +283,14 @@ class JupyterHub(Application):
         return [os.path.join(self.data_files_path, 'templates')]
 
     confirm_no_ssl = Bool(False,
-        help="""DEPRECATED: does nothing"""
+        help="""DEPRECATED since 0.7.0: does nothing"""
     ).tag(config=True)
+
+    @observe('confirm_no_ssl')
+    def _deprecated_congfirm_no_ssl(self, change):
+        self.log.warning("JupyterHub.confirm_no_ssl and --no-ssl are deprecated"
+                         " since JupyterHub 0.7.0 and will have no effects.")
+
     ssl_key = Unicode('',
         help="""Path to SSL key file for the public facing interface of the proxy
 
