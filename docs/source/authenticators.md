@@ -34,6 +34,10 @@ Unless the login form has been customized, `data` will have two keys:
   of the authenticated user if authentication is successful
 - return `None` otherwise
 
+`authenticate` can also return a dictionary with extra information if the
+authentication process requires extra state to be stored, but we can ignore this
+inmost authenticators.
+
 Writing an Authenticator that looks up passwords in a dictionary
 requires only overriding this one method:
 
