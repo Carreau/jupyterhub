@@ -72,6 +72,7 @@ class BaseHandler(RequestHandler):
     @property
     def services(self):
         return self.settings.setdefault('services', {})
+
     @property
     def hub(self):
         return self.settings['hub']
@@ -106,7 +107,7 @@ class BaseHandler(RequestHandler):
     @property
     def csp_report_uri(self):
         return self.settings.get('csp_report_uri',
-            url_path_join(self.hub.base_url, 'security/csp-report')
+            url_path_join(self.base_url, 'security/csp-report')
         )
 
     @property
